@@ -24,14 +24,16 @@ fn main() {
     // Populate givens.
     init(&mut state);
     // Search for a solution.
-    search_for_solution(state);
+    search_for_solution(state, 0, 0);
 }
 
 /*
 Solver
 */
 
-fn search_for_solution(mut state: State) -> bool {
+// Returns true if a solution was found, returns false if the provided state is a dead-end.
+// `starting_i` and `starting_j` are used to skip already solved rows and cols.
+fn search_for_solution(mut state: State, starting_i: usize, starting_j: usize) -> bool {
     // Verify the current state is consistent.
     // Lock in squares with only one possibility.
     while state.unsolved_squares > 0 {
@@ -46,8 +48,12 @@ fn search_for_solution(mut state: State) -> bool {
     }
     if state.unsolved_squares > 0 {
         // If we still haven't solved the board, recursively guess (DFS).
-        for i in 0..9 {
-            for j in 0..9 {
+        for i in starting_i..9 {
+            for j in starting_j..9 {
+                if state.board[i][j].solution > 0 {
+                    // Nothing to do for solved cells.
+                    continue;
+                }
                 for possible_idx in 0..9 {
                     if !state.board[i][j].possible[possible_idx] {
                         // Skip invalid possibilities.
@@ -59,10 +65,14 @@ fn search_for_solution(mut state: State) -> bool {
                         // If the guess results in an invalid state, give up on this branch.
                         continue;
                     }
-                    if search_for_solution(state_copy) {
+                    if search_for_solution(state_copy, i, j) {
                         // If we found a solution, then we're done!
                         return true;
                     }
+                }
+                // If there's no viable solution to the current square, then we're at a dead-end.
+                if state.board[i][j].solution == 0 {
+                    return false;
                 }
             }
         }
@@ -132,14 +142,14 @@ fn propagate_solution(state: &mut State, sln_row: usize, sln_col: usize, solutio
     // Clear option from the row.
     for j in 0..9 {
         board[sln_row][j].possible[sln_val_index] = false;
-        if !square_valid(&board[sln_row][j]) {
+        if !is_square_valid(&board[sln_row][j]) {
             return false;
         }
     }
     // Clear option from the col.
     for i in 0..9 {
         board[i][sln_col].possible[sln_val_index] = false;
-        if !square_valid(&board[i][sln_col]) {
+        if !is_square_valid(&board[i][sln_col]) {
             return false;
         }
     }
@@ -151,7 +161,7 @@ fn propagate_solution(state: &mut State, sln_row: usize, sln_col: usize, solutio
             let row = sub_board_row * 3 + i;
             let col = sub_board_col * 3 + j;
             board[row][col].possible[sln_val_index] = false;
-            if !square_valid(&board[row][col]) {
+            if !is_square_valid(&board[row][col]) {
                 return false;
             }
         }
@@ -189,7 +199,7 @@ fn sub_board_offset(index: usize) -> usize {
     return index / 3;
 }
 
-fn square_valid(square: &Square) -> bool {
+fn is_square_valid(square: &Square) -> bool {
     if square.solution > 0 {
         // Solved squares are valid.
         return true;
