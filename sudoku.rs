@@ -32,7 +32,6 @@ Solver
 */
 
 // Returns true if a solution was found, returns false if the provided state is a dead-end.
-// `starting_i` and `starting_j` are used to skip already solved rows and cols.
 fn search_for_solution(state: State) -> bool {
     if state.unsolved_squares > 0 {
         for i in 0..9 {
