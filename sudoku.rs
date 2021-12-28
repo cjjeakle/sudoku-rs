@@ -22,7 +22,7 @@ fn main() {
         }; 9]; 9],
     };
     // Populate givens.
-    init(&mut state);
+    populate_board_using_input(&mut state);
     // Search for a solution.
     search_for_solution(state, 0, 0);
 }
@@ -34,18 +34,8 @@ Solver
 // Returns true if a solution was found, returns false if the provided state is a dead-end.
 // `starting_i` and `starting_j` are used to skip already solved rows and cols.
 fn search_for_solution(mut state: State, starting_i: usize, starting_j: usize) -> bool {
-    // Verify the current state is consistent.
-    // Lock in squares with only one possibility.
-    while state.unsolved_squares > 0 {
-        // If we made no progress, then we need to stop this search.
-        match find_and_propagate_singletons(&mut state) {
-            SearchProgress::ProgressMade => continue,
-            SearchProgress::NoProgressMade => break,
-            SearchProgress::InvalidState => {
-                return false;
-            }
-        }
-    }
+    // Continually `find_and_propagate_singletons` while it makes forward progress.
+    while find_and_propagate_singletons(&mut state) {}
     if state.unsolved_squares > 0 {
         // If we still haven't solved the board, recursively guess (DFS).
         for i in starting_i..9 {
@@ -59,18 +49,15 @@ fn search_for_solution(mut state: State, starting_i: usize, starting_j: usize) -
                         // Skip invalid possibilities.
                         continue;
                     }
-                    // Copy state and try this solution.
+                    // Copy state and try the current solution.
                     let mut state_copy = state.clone();
-                    if !propagate_solution(&mut state_copy, i, j, (possible_idx + 1) as i8) {
-                        // If the guess results in an invalid state, give up on this branch.
-                        continue;
-                    }
+                    propagate_solution(&mut state_copy, i, j, (possible_idx + 1) as i8);
                     if search_for_solution(state_copy, i, j) {
                         // If we found a solution, then we're done!
                         return true;
                     }
                 }
-                // If there's no viable solution to the current square, then we're at a dead-end.
+                // If there is no viable solution for this square, then we're at a dead-end.
                 if state.board[i][j].solution == 0 {
                     return false;
                 }
@@ -87,15 +74,13 @@ fn search_for_solution(mut state: State, starting_i: usize, starting_j: usize) -
 }
 
 // Finds squares with only one possible solution, and sets that as the square's solution.
-// Returns true if any solution as found during this iteration.
-// Returns an error if the board is in an invalid state.
-enum SearchProgress {
-    ProgressMade,
-    NoProgressMade,
-    InvalidState,
-}
-fn find_and_propagate_singletons(state: &mut State) -> SearchProgress {
-    let mut any_squares_solved = SearchProgress::NoProgressMade;
+// Returns true if any solution as found during this iteration, otherwise false.
+fn find_and_propagate_singletons(state: &mut State) -> bool {
+    // If there are no unsolved squares, then there's nothing to do.
+    if state.unsolved_squares == 0 {
+        return false;
+    }
+    let mut any_squares_solved = false;
     for i in 0..9 {
         for j in 0..9 {
             let mut num_possible = 0;
@@ -107,17 +92,9 @@ fn find_and_propagate_singletons(state: &mut State) -> SearchProgress {
                         possible_idx = sln_idx;
                     };
                 }
-                if num_possible == 0 {
-                    println!("{}, {}", i, j);
-                    println!("possible: {:#?}", state.board[i][j].possible);
-                    print_board(state);
-                }
-                assert!(num_possible > 0);
                 if num_possible == 1 {
-                    any_squares_solved = SearchProgress::ProgressMade;
-                    if !propagate_solution(state, i, j, (possible_idx + 1) as i8) {
-                        return SearchProgress::InvalidState;
-                    }
+                    any_squares_solved = true;
+                    propagate_solution(state, i, j, (possible_idx + 1) as i8)
                 }
             }
         }
@@ -127,31 +104,24 @@ fn find_and_propagate_singletons(state: &mut State) -> SearchProgress {
 
 // Applies solution to the square at offset row, col.
 // Removes solution as a possibility from the square's peers.
-// Returns false if this solution puts the board ends in an invalid state, otherwise returns true.
-fn propagate_solution(state: &mut State, sln_row: usize, sln_col: usize, solution: i8) -> bool {
+fn propagate_solution(state: &mut State, sln_row: usize, sln_col: usize, solution: i8) {
     assert!(sln_row < 9);
     assert!(sln_col < 9);
     assert!(solution >= 1);
     assert!(solution <= 9);
+    assert!(state.unsolved_squares > 0);
     let board = &mut state.board;
     let sln_val_index = (solution - 1) as usize;
     // Set the solution.
-    assert!(state.unsolved_squares > 0);
     state.unsolved_squares -= 1;
     board[sln_row][sln_col].solution = solution;
     // Clear option from the row.
     for j in 0..9 {
         board[sln_row][j].possible[sln_val_index] = false;
-        if !is_square_valid(&board[sln_row][j]) {
-            return false;
-        }
     }
     // Clear option from the col.
     for i in 0..9 {
         board[i][sln_col].possible[sln_val_index] = false;
-        if !is_square_valid(&board[i][sln_col]) {
-            return false;
-        }
     }
     // Clear option from the sub-board.
     let sub_board_row = sub_board_offset(sln_row);
@@ -161,20 +131,15 @@ fn propagate_solution(state: &mut State, sln_row: usize, sln_col: usize, solutio
             let row = sub_board_row * 3 + i;
             let col = sub_board_col * 3 + j;
             board[row][col].possible[sln_val_index] = false;
-            if !is_square_valid(&board[row][col]) {
-                return false;
-            }
         }
     }
-    // Success! No conflicts encountered.
-    return true;
 }
 
 /*
 Utilities
 */
 
-fn init(state: &mut State) {
+fn populate_board_using_input(state: &mut State) {
     // Read input.
     let mut input = String::new();
     match io::stdin().read_line(&mut input) {
@@ -197,20 +162,6 @@ fn init(state: &mut State) {
 fn sub_board_offset(index: usize) -> usize {
     // use truncating integer division to get the sub-board.
     return index / 3;
-}
-
-fn is_square_valid(square: &Square) -> bool {
-    if square.solution > 0 {
-        // Solved squares are valid.
-        return true;
-    }
-    for possible in square.possible {
-        if possible {
-            // Squares with any possibilities are valid.
-            return true;
-        }
-    }
-    return false;
 }
 
 fn print_board(state: &State) {
