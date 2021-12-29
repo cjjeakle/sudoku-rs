@@ -109,13 +109,13 @@ fn parallel_solve(state: State, max_threads: i8) -> bool {
                         // Skip invalid possibilities.
                         continue;
                     }
-                    // Copy state and try the current solution.
+                    // Copy state and try a candidate solution for this square.
                     let mut state_copy = state.clone();
                     state_copy.propagate_solution(i, j, (sln_idx + 1) as i8);
                     // Use `Ordering::SeqCst` to ensure `RUNNING_SOLVER_THREADS` is accurate.
                     let threads_running = RUNNING_SOLVER_THREADS.fetch_add(1, Ordering::SeqCst);
                     if threads_running < max_threads {
-                        // Fork a solver.
+                        // Spawn a solver in another thread.
                         child_threads.push(thread::spawn(move || -> bool {
                             let solution_found = parallel_solve(state_copy, max_threads);
                             RUNNING_SOLVER_THREADS.fetch_add(-1, Ordering::SeqCst);
@@ -131,12 +131,14 @@ fn parallel_solve(state: State, max_threads: i8) -> bool {
                     }
                 }
                 // Wait for all child threads to finish.
-                let mut any_solution_found = false;
                 for thread_handle in child_threads {
-                    any_solution_found |= thread_handle.join().unwrap();
+                    if thread_handle.join().unwrap() {
+                        // If any child thread found a solution, then we're done!
+                        return true;
+                    }
                 }
                 // If we found no solution for this square, then the branch we're on is a dead-end.
-                return any_solution_found;
+                return false;
             }
         }
     } else {
