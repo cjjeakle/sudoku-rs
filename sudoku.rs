@@ -92,7 +92,8 @@ fn parallel_solve(state: State, max_threads: i8) -> bool {
     // Initialize to 1, to account for the main thread.
     static RUNNING_SOLVER_THREADS: AtomicI8 = AtomicI8::new(1);
     static EXECUTION_CANCELLED: AtomicBool = AtomicBool::new(false);
-    if EXECUTION_CANCELLED.load(Ordering::SeqCst) {
+    // Cancellations are best effort, so use relaxed ordering.
+    if EXECUTION_CANCELLED.load(Ordering::Relaxed) {
         return false;
     }
     if state.unsolved_squares > 0 {
@@ -111,8 +112,9 @@ fn parallel_solve(state: State, max_threads: i8) -> bool {
                     // Copy state and try the current solution.
                     let mut state_copy = state.clone();
                     state_copy.propagate_solution(i, j, (sln_idx + 1) as i8);
-                    let count_if_thread_added = RUNNING_SOLVER_THREADS.fetch_add(1, Ordering::SeqCst);
-                    if count_if_thread_added <= max_threads {
+                    // Use sequentially consistent operations, so we don't spawn too many threads.
+                    let threads_running = RUNNING_SOLVER_THREADS.fetch_add(1, Ordering::SeqCst);
+                    if threads_running < max_threads {
                         // Fork a solver.
                         child_threads.push(thread::spawn(move || -> bool {
                             let solution_found = parallel_solve(state_copy, max_threads);
@@ -140,7 +142,8 @@ fn parallel_solve(state: State, max_threads: i8) -> bool {
     } else {
         // Print the solution and cancel other threads.
         print_board(&state);
-        EXECUTION_CANCELLED.store(true, Ordering::SeqCst);
+        // Cancellations are best effort, so use relaxed ordering.
+        EXECUTION_CANCELLED.store(true, Ordering::Relaxed);
         return true;
     }
     // We exhaustively searched this state's possibilities and found no solution.
