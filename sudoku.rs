@@ -1,18 +1,15 @@
 use std::io;
-
-#[derive(Copy, Clone)]
-struct Square {
-    solution: i8,
-    possible: [bool; 9],
-}
-
-#[derive(Copy, Clone)]
-struct State {
-    unsolved_squares: i8,
-    board: [[Square; 9]; 9],
-}
+use std::sync::atomic::{AtomicBool, AtomicI8, Ordering};
+use std::thread;
 
 fn main() {
+    // Get command line args.
+    let num_threads_arg = std::env::args()
+        .nth(1)
+        .expect("Please specify a number of threads via command line arg, e.g. `./sudoku 2`");
+    let num_threads = num_threads_arg.parse::<i8>().unwrap();
+    // We need at least one thread to do the work.
+    assert!(num_threads > 0, "{}", num_threads);
     // Provision state.
     let mut state = State {
         unsolved_squares: 81,
@@ -24,7 +21,66 @@ fn main() {
     // Populate givens.
     populate_board_using_input(&mut state);
     // Search for a solution.
-    search_for_solution(state);
+    parallel_solve(state, num_threads);
+}
+
+/*
+State
+*/
+
+#[derive(Copy, Clone)]
+struct State {
+    unsolved_squares: i8,
+    board: [[Square; 9]; 9],
+}
+
+#[derive(Copy, Clone)]
+struct Square {
+    solution: i8,
+    possible: [bool; 9],
+}
+
+impl State {
+    // Applies solution to the square at offset row, col.
+    // Removes solution as a possibility from the square's peers.
+    fn propagate_solution(&mut self, target_row: usize, target_col: usize, solution: i8) {
+        assert!(target_row < 9);
+        assert!(target_col < 9);
+        assert!(solution >= 1);
+        assert!(solution <= 9);
+        assert!(self.unsolved_squares > 0);
+        // Set the solution.
+        self.unsolved_squares -= 1;
+        self.board[target_row][target_col].solution = solution;
+        // Clear all possibilities for the target square.
+        for i in 0..9 {
+            self.board[target_row][target_col].possible[i] = false;
+        }
+        let sln_idx = (solution - 1) as usize;
+        // Clear option from the row.
+        for j in 0..9 {
+            self.board[target_row][j].possible[sln_idx] = false;
+        }
+        // Clear option from the col.
+        for i in 0..9 {
+            self.board[i][target_col].possible[sln_idx] = false;
+        }
+        // Clear option from the sub-board.
+        let sub_board_row = State::sub_board_offset(target_row);
+        let sub_board_col = State::sub_board_offset(target_col);
+        for i in 0..3 {
+            for j in 0..3 {
+                let row = sub_board_row * 3 + i;
+                let col = sub_board_col * 3 + j;
+                self.board[row][col].possible[sln_idx] = false;
+            }
+        }
+    }
+
+    fn sub_board_offset(index: usize) -> usize {
+        // use truncating integer division to get the sub-board.
+        return index / 3;
+    }
 }
 
 /*
@@ -32,7 +88,13 @@ Solver
 */
 
 // Returns true if a solution was found, returns false if the provided state is a dead-end.
-fn search_for_solution(state: State) -> bool {
+fn parallel_solve(state: State, max_threads: i8) -> bool {
+    // Initialize to 1, to account for the main thread.
+    static RUNNING_SOLVER_THREADS: AtomicI8 = AtomicI8::new(1);
+    static EXECUTION_CANCELLED: AtomicBool = AtomicBool::new(false);
+    if EXECUTION_CANCELLED.load(Ordering::SeqCst) {
+        return false;
+    }
     if state.unsolved_squares > 0 {
         for i in 0..9 {
             for j in 0..9 {
@@ -40,6 +102,7 @@ fn search_for_solution(state: State) -> bool {
                     // Nothing to do for solved cells.
                     continue;
                 }
+                let mut child_threads = vec![];
                 for sln_idx in 0..9 {
                     if !state.board[i][j].possible[sln_idx] {
                         // Skip invalid possibilities.
@@ -47,67 +110,45 @@ fn search_for_solution(state: State) -> bool {
                     }
                     // Copy state and try the current solution.
                     let mut state_copy = state.clone();
-                    propagate_solution(&mut state_copy, i, j, (sln_idx + 1) as i8);
-                    if search_for_solution(state_copy) {
-                        // If we found a solution, then we're done!
-                        return true;
+                    state_copy.propagate_solution(i, j, (sln_idx + 1) as i8);
+                    let count_if_thread_added = RUNNING_SOLVER_THREADS.fetch_add(1, Ordering::SeqCst);
+                    if count_if_thread_added <= max_threads {
+                        // Fork a solver.
+                        child_threads.push(thread::spawn(move || -> bool {
+                            let solution_found = parallel_solve(state_copy, max_threads);
+                            RUNNING_SOLVER_THREADS.fetch_add(-1, Ordering::SeqCst);
+                            return solution_found;
+                        }));
+                    } else {
+                        // Decrement if we don't end up kicking off a thread.
+                        RUNNING_SOLVER_THREADS.fetch_add(-1, Ordering::SeqCst);
+                        if parallel_solve(state_copy, max_threads) {
+                            // If we found a solution, then we're done!
+                            return true;
+                        }
                     }
                 }
-                if state.board[i][j].solution == 0 {
-                    // If we found no solution for this square, then we're at a dead-end.
-                    return false;
+                // Wait for all child threads to finish.
+                let mut any_solution_found = false;
+                for thread_handle in child_threads {
+                    any_solution_found |= thread_handle.join().unwrap();
                 }
+                // If we found no solution for this square, then the branch we're on is a dead-end.
+                return any_solution_found;
             }
         }
     } else {
-        // If we have a solution, then we're done!
-        // Print the solution.
+        // Print the solution and cancel other threads.
         print_board(&state);
+        EXECUTION_CANCELLED.store(true, Ordering::SeqCst);
         return true;
     }
     // We exhaustively searched this state's possibilities and found no solution.
     return false;
 }
 
-// Applies solution to the square at offset row, col.
-// Removes solution as a possibility from the square's peers.
-fn propagate_solution(state: &mut State, target_row: usize, target_col: usize, solution: i8) {
-    assert!(target_row < 9);
-    assert!(target_col < 9);
-    assert!(solution >= 1);
-    assert!(solution <= 9);
-    assert!(state.unsolved_squares > 0);
-    let board = &mut state.board;
-    // Set the solution.
-    state.unsolved_squares -= 1;
-    board[target_row][target_col].solution = solution;
-    // Clear all possibilities for the target square.
-    for i in 0..9 {
-        board[target_row][target_col].possible[i] = false;
-    }
-    let sln_idx = (solution - 1) as usize;
-    // Clear option from the row.
-    for j in 0..9 {
-        board[target_row][j].possible[sln_idx] = false;
-    }
-    // Clear option from the col.
-    for i in 0..9 {
-        board[i][target_col].possible[sln_idx] = false;
-    }
-    // Clear option from the sub-board.
-    let sub_board_row = sub_board_offset(target_row);
-    let sub_board_col = sub_board_offset(target_col);
-    for i in 0..3 {
-        for j in 0..3 {
-            let row = sub_board_row * 3 + i;
-            let col = sub_board_col * 3 + j;
-            board[row][col].possible[sln_idx] = false;
-        }
-    }
-}
-
 /*
-Utilities
+I/O
 */
 
 fn populate_board_using_input(state: &mut State) {
@@ -125,15 +166,10 @@ fn populate_board_using_input(state: &mut State) {
         for j in 0..9 {
             let cur_byte = input_bytes[i * 9 + j] as u8;
             if cur_byte >= '1' as u8 && cur_byte <= '9' as u8 {
-                propagate_solution(state, i, j, cur_byte as i8 - '0' as i8);
+                state.propagate_solution(i, j, cur_byte as i8 - '0' as i8);
             }
         }
     }
-}
-
-fn sub_board_offset(index: usize) -> usize {
-    // use truncating integer division to get the sub-board.
-    return index / 3;
 }
 
 fn print_board(state: &State) {
