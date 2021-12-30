@@ -1,5 +1,5 @@
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicI8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::thread;
 
 fn main() {
@@ -7,7 +7,7 @@ fn main() {
     let num_threads_arg = std::env::args()
         .nth(1)
         .expect("Please specify a number of threads via command line arg, e.g. `./sudoku 2`");
-    let num_threads = num_threads_arg.parse::<i8>().unwrap();
+    let num_threads = num_threads_arg.parse::<isize>().unwrap();
     // We need at least one thread to do the work.
     assert!(num_threads > 0, "{}", num_threads);
     // Provision state.
@@ -15,13 +15,14 @@ fn main() {
         unsolved_squares: 81,
         board: [[Square {
             solution: 0,
+            num_possible: 9,
             possible: [true; 9],
         }; 9]; 9],
     };
     // Populate givens.
     populate_board_using_input(&mut state);
     // Search for a solution.
-    parallel_solve(state, num_threads);
+    parallel_solve(state, 0, 0, num_threads);
 }
 
 /*
@@ -37,13 +38,15 @@ struct State {
 #[derive(Copy, Clone)]
 struct Square {
     solution: i8,
+    num_possible: i8,
     possible: [bool; 9],
 }
 
 impl State {
     // Applies solution to the square at offset row, col.
     // Removes solution as a possibility from the square's peers.
-    fn propagate_solution(&mut self, target_row: usize, target_col: usize, solution: i8) {
+    // Returns true if the board remains valid after the solution was applied, false otherwise.
+    fn propagate_solution(&mut self, target_row: usize, target_col: usize, solution: i8) -> bool {
         assert!(target_row < 9);
         assert!(target_col < 9);
         assert!(solution >= 1);
@@ -53,28 +56,51 @@ impl State {
         self.unsolved_squares -= 1;
         self.board[target_row][target_col].solution = solution;
         // Clear all possibilities for the target square.
+        self.board[target_row][target_col].num_possible = 0;
         for i in 0..9 {
             self.board[target_row][target_col].possible[i] = false;
         }
-        let sln_idx = (solution - 1) as usize;
-        // Clear option from the row.
+        // Clear option across the row.
         for j in 0..9 {
-            self.board[target_row][j].possible[sln_idx] = false;
+            if !self.remove_possibility(target_row, j, solution) {
+                return false;
+            }
         }
-        // Clear option from the col.
+        // Clear option up and down the col.
         for i in 0..9 {
-            self.board[i][target_col].possible[sln_idx] = false;
+            if !self.remove_possibility(i, target_col, solution) {
+                return false;
+            }
         }
-        // Clear option from the sub-board.
+        // Clear option throughout the sub-board.
         let sub_board_row = State::sub_board_offset(target_row);
         let sub_board_col = State::sub_board_offset(target_col);
         for i in 0..3 {
             for j in 0..3 {
                 let row = sub_board_row * 3 + i;
                 let col = sub_board_col * 3 + j;
-                self.board[row][col].possible[sln_idx] = false;
+                if !self.remove_possibility(row, col, solution) {
+                    return false;
+                }
             }
         }
+        return true;
+    }
+
+    // Removes the possibility from the specified square.
+    // Returns whether the square remains valid/viable afterward.
+    fn remove_possibility(&mut self, row: usize, col: usize, solution: i8) -> bool {
+        assert!(row < 9);
+        assert!(col < 9);
+        assert!(solution > 0);
+        assert!(solution <= 9);
+        let peer_cell = &mut self.board[row][col];
+        let possibility_idx = (solution - 1) as usize;
+        if peer_cell.possible[possibility_idx] {
+            peer_cell.num_possible -= 1;
+            peer_cell.possible[possibility_idx] = false;
+        }
+        return peer_cell.is_valid();
     }
 
     fn sub_board_offset(index: usize) -> usize {
@@ -83,25 +109,62 @@ impl State {
     }
 }
 
+impl Square {
+    fn is_valid(&self) -> bool {
+        return self.solution > 0 || self.num_possible > 0;
+    }
+}
+
 /*
 Solver
 */
 
 // Returns true if a solution was found, returns false if the provided state is a dead-end.
-fn parallel_solve(state: State, max_threads: i8) -> bool {
+fn parallel_solve(
+    state: State,
+    skip_to_row: usize,
+    skip_to_col: usize,
+    max_threads: isize,
+) -> bool {
+    assert!(max_threads > 0);
     // Initialize to 1, to account for the main thread.
-    static RUNNING_SOLVER_THREADS: AtomicI8 = AtomicI8::new(1);
+    static THREAD_QUOTA_IN_USE: AtomicIsize = AtomicIsize::new(1);
     static EXECUTION_CANCELLED: AtomicBool = AtomicBool::new(false);
     // Cancellations are best effort, so use `Ordering::Relaxed`.
     if EXECUTION_CANCELLED.load(Ordering::Relaxed) {
         return false;
     }
+    let mut i = skip_to_row;
+    let mut j = skip_to_col;
     if state.unsolved_squares > 0 {
-        for i in 0..9 {
-            for j in 0..9 {
+        while i < 9 {
+            while j < 9 {
                 if state.board[i][j].solution > 0 {
                     // Nothing to do for solved cells.
+                    j += 1;
                     continue;
+                }
+                if !state.board[i][j].is_valid() {
+                    // If any square is invalid, then this branch is a dead-end.
+                    return false;
+                }
+                let threads_needed: isize = state.board[i][j].num_possible.into();
+                // Request threads to branch off and explore possibilities in parallel.
+                // Use `Ordering::SeqCst` to ensure `RUNNING_SOLVER_THREADS` is accurate.
+                let thread_quota_in_use =
+                    THREAD_QUOTA_IN_USE.fetch_add(threads_needed, Ordering::SeqCst);
+                let mut threads_available = if thread_quota_in_use < max_threads {
+                    max_threads - thread_quota_in_use
+                } else {
+                    0
+                };
+                let overflow = if threads_available < threads_needed {
+                    threads_needed - threads_available
+                } else {
+                    0
+                };
+                if overflow > 0 {
+                    THREAD_QUOTA_IN_USE.fetch_add(-overflow, Ordering::SeqCst);
                 }
                 let mut child_threads = vec![];
                 for sln_idx in 0..9 {
@@ -112,19 +175,18 @@ fn parallel_solve(state: State, max_threads: i8) -> bool {
                     // Copy state and try a candidate solution for this square.
                     let mut state_copy = state.clone();
                     state_copy.propagate_solution(i, j, (sln_idx + 1) as i8);
-                    // Use `Ordering::SeqCst` to ensure `RUNNING_SOLVER_THREADS` is accurate.
-                    let threads_running = RUNNING_SOLVER_THREADS.fetch_add(1, Ordering::SeqCst);
-                    if threads_running < max_threads {
-                        // Spawn a solver in another thread.
+                    // If there are multiple possibilities to explore, and there are threads available,
+                    // spawn a solver in another thread.
+                    if threads_available > 0 {
+                        threads_available -= 1;
                         child_threads.push(thread::spawn(move || -> bool {
-                            let solution_found = parallel_solve(state_copy, max_threads);
-                            RUNNING_SOLVER_THREADS.fetch_add(-1, Ordering::SeqCst);
+                            let solution_found = parallel_solve(state_copy, i, j + 1, max_threads);
+                            THREAD_QUOTA_IN_USE.fetch_add(-1, Ordering::SeqCst);
                             return solution_found;
                         }));
                     } else {
                         // Decrement if we don't end up kicking off a thread.
-                        RUNNING_SOLVER_THREADS.fetch_add(-1, Ordering::SeqCst);
-                        if parallel_solve(state_copy, max_threads) {
+                        if parallel_solve(state_copy, i, j + 1, max_threads) {
                             // If we found a solution, then we're done!
                             return true;
                         }
@@ -140,6 +202,8 @@ fn parallel_solve(state: State, max_threads: i8) -> bool {
                 // If we found no solution for this square, then the branch we're on is a dead-end.
                 return false;
             }
+            i += 1;
+            j = 0;
         }
     } else {
         // Print the solution and cancel other threads.
@@ -148,7 +212,8 @@ fn parallel_solve(state: State, max_threads: i8) -> bool {
         EXECUTION_CANCELLED.store(true, Ordering::Relaxed);
         return true;
     }
-    // We exhaustively searched this state's possibilities and found no solution.
+    // We should not get to this point.
+    assert!(false);
     return false;
 }
 
@@ -171,7 +236,7 @@ fn populate_board_using_input(state: &mut State) {
         for j in 0..9 {
             let cur_byte = input_bytes[i * 9 + j] as u8;
             if cur_byte >= '1' as u8 && cur_byte <= '9' as u8 {
-                state.propagate_solution(i, j, cur_byte as i8 - '0' as i8);
+                assert!(state.propagate_solution(i, j, cur_byte as i8 - '0' as i8));
             }
         }
     }
