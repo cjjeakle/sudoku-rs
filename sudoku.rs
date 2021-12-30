@@ -185,8 +185,7 @@ fn parallel_solve_impl(state: State, row: usize, col: usize, max_threads: isize)
         // Copy state and try a candidate solution for this square.
         let mut state_copy = state.clone();
         state_copy.propagate_solution(row, col, (sln_idx + 1) as i8);
-        // If there are multiple possibilities to explore, and there are threads available,
-        // spawn a solver in another thread.
+        // If there are threads available, use one to explore this candidate solution.
         if extra_threads_available > 0 {
             extra_threads_available -= 1;
             child_threads.push(thread::spawn(move || -> bool {
@@ -195,7 +194,6 @@ fn parallel_solve_impl(state: State, row: usize, col: usize, max_threads: isize)
                 return solution_found;
             }));
         } else {
-            // Decrement if we don't end up kicking off a thread.
             if parallel_solve(state_copy, row, col + 1, max_threads) {
                 // If we found a solution, then we're done!
                 return true;
