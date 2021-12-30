@@ -205,7 +205,9 @@ fn parallel_solve_impl(state: State, row: usize, col: usize, max_threads: isize)
     // Wait for all child threads to finish.
     for thread_handle in child_threads {
         // If any child thread found a solution, then we're done!
-        if thread_handle.join().unwrap() { return true; }
+        if thread_handle.join().unwrap() {
+            return true;
+        }
     }
     // If we found no solution for this square, then the branch we're on is a dead-end.
     return false;
