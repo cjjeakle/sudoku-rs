@@ -133,15 +133,15 @@ fn parallel_solve(state: State, mut row: usize, mut col: usize, max_threads: isi
     if state.unsolved_squares > 0 {
         while row < 9 {
             while col < 9 {
+                // Assert that we prune invalid states before we recurse.
+                assert!(state.board[row][col].is_valid());
+                // Nothing to do for solved cells.
                 if state.board[row][col].solution > 0 {
-                    // Nothing to do for solved cells.
                     col += 1;
                     continue;
                 }
-                if !state.board[row][col].is_valid() {
-                    // If any square is invalid, then this branch is a dead-end.
-                    return false;
-                }
+                // Explore this cell's possible solutions.
+                // Will return true if there's a solution, false if the current state is a dead-end.
                 return parallel_solve_impl(state, row, col, max_threads);
             }
             row += 1;
@@ -172,9 +172,10 @@ fn parallel_solve_impl(state: State, row: usize, col: usize, max_threads: isize)
         0,
     );
     let mut extra_threads_available = cmp::min(thread_quota_available, extra_threads_to_request);
-    let overflow = cmp::max(extra_threads_to_request - extra_threads_available, 0);
-    if overflow > 0 {
-        THREAD_QUOTA_IN_USE.fetch_add(-overflow, Ordering::SeqCst);
+    // Return any quota overage, since we cannot permit more than `max_threads`.
+    let amount_over_max = cmp::max(extra_threads_to_request - extra_threads_available, 0);
+    if amount_over_max > 0 {
+        THREAD_QUOTA_IN_USE.fetch_add(-amount_over_max, Ordering::SeqCst);
     }
     let mut child_threads = vec![];
     for sln_idx in 0..9 {
@@ -184,7 +185,10 @@ fn parallel_solve_impl(state: State, row: usize, col: usize, max_threads: isize)
         }
         // Copy state and try a candidate solution for this square.
         let mut state_copy = state.clone();
-        state_copy.propagate_solution(row, col, (sln_idx + 1) as i8);
+        let still_valid = state_copy.propagate_solution(row, col, (sln_idx + 1) as i8);
+        if !still_valid {
+            continue;
+        }
         // If there are threads available, use one to explore this candidate solution.
         if extra_threads_available > 0 {
             extra_threads_available -= 1;
@@ -199,6 +203,10 @@ fn parallel_solve_impl(state: State, row: usize, col: usize, max_threads: isize)
                 return true;
             }
         }
+    }
+    // Return any unused thread quota.
+    if extra_threads_available > 0 {
+        THREAD_QUOTA_IN_USE.fetch_add(-extra_threads_available, Ordering::SeqCst);
     }
     // Wait for all child threads to finish.
     for thread_handle in child_threads {
